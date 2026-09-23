@@ -41,32 +41,29 @@ class ProviderClient:
                 "request_error",
             )
 
-        if 200 <= response.status_code < 300:
-            try:
-                response_json = response.json()
-            except ValueError:
-                return self._result(
-                    config,
-                    started_at,
-                    response.status_code,
-                    ProviderOutcome.REQUEST_ERROR,
-                    "invalid_json",
-                )
-            if isinstance(response_json, dict):
-                return self._result(
-                    config,
-                    started_at,
-                    response.status_code,
-                    ProviderOutcome.SUCCESS,
-                    None,
-                    response_json,
-                )
+        response_json: dict[str, Any] | None = None
+        try:
+            parsed_json = response.json()
+            if isinstance(parsed_json, dict):
+                response_json = parsed_json
+        except ValueError:
+            pass
+        if 200 <= response.status_code < 300 and response_json is None:
             return self._result(
                 config,
                 started_at,
                 response.status_code,
                 ProviderOutcome.REQUEST_ERROR,
                 "invalid_json",
+            )
+        if 200 <= response.status_code < 300:
+            return self._result(
+                config,
+                started_at,
+                response.status_code,
+                ProviderOutcome.SUCCESS,
+                None,
+                response_json,
             )
         if 400 <= response.status_code < 500:
             return self._result(
@@ -75,6 +72,7 @@ class ProviderClient:
                 response.status_code,
                 ProviderOutcome.CLIENT_ERROR,
                 "upstream_4xx",
+                response_json,
             )
         if 500 <= response.status_code < 600:
             return self._result(
@@ -83,6 +81,7 @@ class ProviderClient:
                 response.status_code,
                 ProviderOutcome.SERVER_ERROR,
                 "upstream_5xx",
+                response_json,
             )
         return self._result(
             config,

@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from app.api.routes import router
 from app.config import Settings
 from app.providers.client import ProviderClient
+from app.providers.router import ProviderRouter
 
 settings = Settings()
 
@@ -20,6 +21,7 @@ async def lifespan(app: FastAPI):
     )
     async with httpx.AsyncClient(timeout=timeout) as http_client:
         app.state.provider_client = ProviderClient(http_client)
+        app.state.provider_router = ProviderRouter(settings.provider_configs)
         yield
 
 

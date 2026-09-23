@@ -84,7 +84,7 @@ async def test_upstream_4xx_is_classified(
     assert result.outcome is ProviderOutcome.CLIENT_ERROR
     assert result.status_code == 422
     assert result.error_class == "upstream_4xx"
-    assert result.response_json is None
+    assert result.response_json == {"detail": "invalid"}
 
 
 @pytest.mark.asyncio
