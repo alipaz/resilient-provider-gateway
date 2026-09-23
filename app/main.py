@@ -1,10 +1,29 @@
+from contextlib import asynccontextmanager
+
+import httpx
 from fastapi import FastAPI
 
 from app.api.routes import router
 from app.config import Settings
+from app.providers.client import ProviderClient
 
 settings = Settings()
-app = FastAPI()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    timeout = httpx.Timeout(
+        connect=settings.PROVIDER_CONNECT_TIMEOUT_SECONDS,
+        read=settings.PROVIDER_READ_TIMEOUT_SECONDS,
+        write=settings.PROVIDER_WRITE_TIMEOUT_SECONDS,
+        pool=settings.PROVIDER_POOL_TIMEOUT_SECONDS,
+    )
+    async with httpx.AsyncClient(timeout=timeout) as http_client:
+        app.state.provider_client = ProviderClient(http_client)
+        yield
+
+
+app = FastAPI(lifespan=lifespan)
 app.include_router(router)
 
 
