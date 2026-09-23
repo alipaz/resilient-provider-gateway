@@ -20,6 +20,18 @@ class Settings(BaseSettings):
     PROVIDER_WRITE_TIMEOUT_SECONDS: float = 10.0
     PROVIDER_POOL_TIMEOUT_SECONDS: float = 2.0
     REQUEST_DEADLINE_SECONDS: float = 15.0
+    MAX_INFLIGHT: int = 200
+    ADMISSION_WAIT_MS: int = 50
+    REDIS_URL: str = "redis://localhost:6379/0"
+    PROVIDER_A_RATE_CAPACITY: int = 10
+    PROVIDER_A_RATE_REFILL_RPS: float = 10.0
+    PROVIDER_B_RATE_CAPACITY: int = 100
+    PROVIDER_B_RATE_REFILL_RPS: float = 100.0
+    PROVIDER_C_RATE_CAPACITY: int = 100
+    PROVIDER_C_RATE_REFILL_RPS: float = 100.0
+    PROVIDER_A_MAX_CONCURRENT: int = 10
+    PROVIDER_B_MAX_CONCURRENT: int = 100
+    PROVIDER_C_MAX_CONCURRENT: int = 100
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -49,3 +61,19 @@ class Settings(BaseSettings):
             "http://provider-b:8000/v1/process",
             "http://provider-c:8000/v1/process",
         )
+
+    def provider_rate_limit(self, provider_name: str) -> tuple[int, float]:
+        limits = {
+            "provider_a": (self.PROVIDER_A_RATE_CAPACITY, self.PROVIDER_A_RATE_REFILL_RPS),
+            "provider_b": (self.PROVIDER_B_RATE_CAPACITY, self.PROVIDER_B_RATE_REFILL_RPS),
+            "provider_c": (self.PROVIDER_C_RATE_CAPACITY, self.PROVIDER_C_RATE_REFILL_RPS),
+        }
+        return limits[provider_name]
+
+    def provider_max_concurrent(self, provider_name: str) -> int:
+        limits = {
+            "provider_a": self.PROVIDER_A_MAX_CONCURRENT,
+            "provider_b": self.PROVIDER_B_MAX_CONCURRENT,
+            "provider_c": self.PROVIDER_C_MAX_CONCURRENT,
+        }
+        return limits[provider_name]

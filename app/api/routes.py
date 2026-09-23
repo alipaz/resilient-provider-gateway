@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.core.context import set_request_context
 from app.providers.models import ProviderOutcome, ProviderRequestResult, ProviderResult
+from app.resilience.rate_limiter import RateLimiterUnavailable
 
 router = APIRouter(prefix="/v1")
 
@@ -23,12 +24,31 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
             detail=str(error),
         ) from error
 
+    if not await request.app.state.admission.acquire():
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={"error": {"code": "admission_rejected"}},
+            headers={"Retry-After": "1", "X-Request-ID": request_id, "X-Trace-ID": trace_id},
+        )
+    try:
+        return await _proxy_request(request, payload, request_id, trace_id)
+    finally:
+        request.app.state.admission.release()
+
+
+async def _proxy_request(
+    request: Request,
+    payload: dict[str, Any],
+    request_id: str,
+    trace_id: str,
+) -> JSONResponse:
     request_started_at = perf_counter()
     attempted_providers: set[str] = set()
     attempts = []
     result: ProviderResult | None = None
     provider_name: str | None = None
-    for _ in range(2):
+    rate_limited = False
+    while len(attempts) < 2:
         remaining_seconds = request.app.state.settings.REQUEST_DEADLINE_SECONDS - (
             perf_counter() - request_started_at
         )
@@ -44,17 +64,35 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
             break
         provider = request.app.state.provider_router.select(eligible=eligible)
         if not request.app.state.circuit_breaker.allow(provider.name):
+            attempted_providers.add(provider.name)
             continue
         attempted_providers.add(provider.name)
+        capacity, refill_rate = request.app.state.settings.provider_rate_limit(provider.name)
+        try:
+            rate_decision = await request.app.state.rate_limiter.check(
+                provider.name,
+                capacity=capacity,
+                refill_rate=refill_rate,
+            )
+        except RateLimiterUnavailable:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": {"code": "rate_limiter_unavailable"}},
+                headers={"X-Request-ID": request_id, "X-Trace-ID": trace_id},
+            )
+        if not rate_decision.allowed:
+            rate_limited = True
+            continue
         provider_name = provider.name
         request.app.state.provider_router.start_attempt(provider)
         attempt_started_at = perf_counter()
         try:
-            result = await request.app.state.provider_client.process(
-                provider,
-                payload,
-                timeout=remaining_seconds,
-            )
+            async with request.app.state.provider_semaphores[provider.name]:
+                result = await request.app.state.provider_client.process(
+                    provider,
+                    payload,
+                    timeout=remaining_seconds,
+                )
         finally:
             elapsed_ms = (perf_counter() - attempt_started_at) * 1000
             request.app.state.provider_router.finish_attempt(provider, elapsed_ms)
@@ -69,6 +107,16 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
     request_result = ProviderRequestResult(result=result, attempts=tuple(attempts))
     request.state.provider_request_result = request_result
     if result is None:
+        if rate_limited:
+            return JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"error": {"code": "provider_rate_limited"}},
+                headers={
+                    "Retry-After": "1",
+                    "X-Request-ID": request_id,
+                    "X-Trace-ID": trace_id,
+                },
+            )
         return JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"error": {"code": "no_provider_available"}},

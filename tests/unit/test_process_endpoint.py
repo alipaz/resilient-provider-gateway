@@ -3,6 +3,7 @@ import pytest
 import respx
 
 from app.main import app
+from app.resilience.rate_limiter import RateLimitDecision, RateLimiterUnavailable
 
 
 class FailingProviderClient:
@@ -10,9 +11,33 @@ class FailingProviderClient:
         raise RuntimeError("unexpected client failure")
 
 
+class FakeRateLimiter:
+    def __init__(
+        self,
+        decisions: dict[str, bool] | None = None,
+        failure: Exception | None = None,
+    ) -> None:
+        self.decisions = decisions or {}
+        self.failure = failure
+
+    async def check(
+        self,
+        provider_name: str,
+        capacity: int,
+        refill_rate: float,
+    ) -> RateLimitDecision:
+        if self.failure is not None:
+            raise self.failure
+        return RateLimitDecision(
+            allowed=self.decisions.get(provider_name, True),
+            retry_after_seconds=1,
+        )
+
+
 @pytest.fixture
 async def api_client() -> httpx.AsyncClient:
     async with app.router.lifespan_context(app):
+        app.state.rate_limiter = FakeRateLimiter()
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             yield client
@@ -75,6 +100,7 @@ async def test_process_preserves_unexpected_client_error_and_releases_provider()
     async with app.router.lifespan_context(app):
         provider_router = app.state.provider_router
         app.state.provider_client = FailingProviderClient()
+        app.state.rate_limiter = FakeRateLimiter()
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             caught_error: Exception | None = None
@@ -184,3 +210,46 @@ async def test_process_returns_service_unavailable_when_all_circuits_are_open(
 
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "no_provider_available"
+
+
+@pytest.mark.asyncio
+async def test_process_falls_back_after_a_provider_rate_limit_denial(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+) -> None:
+    app.state.rate_limiter = FakeRateLimiter({"provider_a": False, "provider_b": True})
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 200
+    assert response.headers["x-upstream-provider"] == "provider_b"
+    assert len(provider_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_returns_too_many_requests_when_all_providers_are_rate_limited(
+    api_client: httpx.AsyncClient,
+) -> None:
+    app.state.rate_limiter = FakeRateLimiter(
+        {"provider_a": False, "provider_b": False, "provider_c": False}
+    )
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_process_maps_rate_limiter_failure_to_service_unavailable(
+    api_client: httpx.AsyncClient,
+) -> None:
+    app.state.rate_limiter = FakeRateLimiter(failure=RateLimiterUnavailable())
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "rate_limiter_unavailable"

@@ -49,7 +49,9 @@ class CircuitBreaker:
     def is_eligible(self, provider_name: str) -> bool:
         circuit = self._circuits[provider_name]
         state = self.state(provider_name)
-        return state is CircuitState.CLOSED or not circuit.probe_in_flight
+        return state is CircuitState.CLOSED or (
+            state is CircuitState.HALF_OPEN and not circuit.probe_in_flight
+        )
 
     def allow(self, provider_name: str) -> bool:
         circuit = self._circuits[provider_name]
