@@ -44,6 +44,10 @@ class ProviderRouter:
     def ewma_latency_ms(self, provider_name: str) -> float | None:
         return self._ewma_latency_ms[provider_name]
 
+    @property
+    def provider_names(self) -> tuple[str, ...]:
+        return self._order
+
     def _normalized_load(self, provider_name: str) -> float:
         latency_ms = self._ewma_latency_ms[provider_name] or 1.0
         return self._in_flight[provider_name] * latency_ms

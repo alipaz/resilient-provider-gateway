@@ -11,14 +11,16 @@ one lifespan-managed asynchronous HTTP client for single upstream attempts.
 Step 3 adds in-memory selection across exactly three providers using in-flight
 load, EWMA latency, and round-robin tie-breaking; the process endpoint proxies
 one selected upstream request. Database, Redis, Celery, metrics, and deployment
-integrations remain out of scope until their respective steps.
+integrations remain out of scope until their respective steps. Step 4 adds a
+bounded two-attempt retry and a per-process circuit breaker; per-process breaker
+state is a deliberate time-boxed design and is not shared through Redis.
 
 ## Steps 1-10
 
 - [x] Step 1 — project bootstrap, typed settings, health endpoint, and route reservation.
 - [x] Step 2 — provider contracts, URL selection, request context, and async client.
 - [x] Step 3 — in-memory provider routing and process endpoint proxying.
-- [ ] Step 4 — not implemented.
+- [x] Step 4 — bounded retry, request deadline, and per-process circuit breaker.
 - [ ] Step 5 — not implemented.
 - [ ] Step 6 — not implemented.
 - [ ] Step 7 — not implemented.

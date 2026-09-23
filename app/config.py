@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     PROVIDER_READ_TIMEOUT_SECONDS: float = 10.0
     PROVIDER_WRITE_TIMEOUT_SECONDS: float = 10.0
     PROVIDER_POOL_TIMEOUT_SECONDS: float = 2.0
+    REQUEST_DEADLINE_SECONDS: float = 15.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

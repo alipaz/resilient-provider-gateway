@@ -51,3 +51,9 @@ class ProviderResult:
     @property
     def error_class(self) -> str | None:
         return self.attempt.error_class
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderRequestResult:
+    result: ProviderResult | None
+    attempts: tuple[ProviderAttempt, ...]

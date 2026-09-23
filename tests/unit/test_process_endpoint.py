@@ -6,7 +6,7 @@ from app.main import app
 
 
 class FailingProviderClient:
-    async def process(self, config: object, payload: object) -> None:
+    async def process(self, config: object, payload: object, timeout: float | None = None) -> None:
         raise RuntimeError("unexpected client failure")
 
 
@@ -84,3 +84,103 @@ async def test_process_preserves_unexpected_client_error_and_releases_provider()
                 caught_error = error
 
     assert (type(caught_error), provider_router.in_flight("provider_a")) == (RuntimeError, 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_response", "first_error"),
+    [
+        (httpx.Response(429, json={"detail": "busy"}), None),
+        (httpx.Response(503, json={"detail": "unavailable"}), None),
+        (None, httpx.ReadTimeout("timed out")),
+    ],
+)
+async def test_process_retries_retryable_failure_with_a_different_provider(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+    first_response: httpx.Response | None,
+    first_error: Exception | None,
+) -> None:
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process")
+    provider_a.mock(return_value=first_response, side_effect=first_error)
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 200
+    assert response.json() == {"provider": "b"}
+    assert response.headers["x-upstream-provider"] == "provider_b"
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_does_not_retry_a_non_retryable_4xx(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+) -> None:
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(400, json={"detail": "bad request"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process")
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 400
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_stops_after_two_attempts(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+) -> None:
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(503, json={"detail": "unavailable"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(503, json={"detail": "unavailable"})
+    )
+    provider_c = respx_mock.post("http://provider-c:8000/v1/process")
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 1
+    assert len(provider_c.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_process_returns_gateway_timeout_when_all_attempts_time_out(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+) -> None:
+    respx_mock.post("http://provider-a:8000/v1/process").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+    respx_mock.post("http://provider-b:8000/v1/process").mock(
+        side_effect=httpx.ReadTimeout("timed out")
+    )
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_process_returns_service_unavailable_when_all_circuits_are_open(
+    api_client: httpx.AsyncClient,
+) -> None:
+    breaker = app.state.circuit_breaker
+    for provider_name in app.state.provider_router.provider_names:
+        for _ in range(5):
+            breaker.record(provider_name, failed=True)
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_provider_available"
