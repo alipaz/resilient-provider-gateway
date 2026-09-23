@@ -17,9 +17,7 @@ class ProviderRouter:
         if not eligible_names:
             raise LookupError("No eligible providers")
         lowest_load = min(self._normalized_load(name) for name in eligible_names)
-        tied = {
-            name for name in eligible_names if self._normalized_load(name) == lowest_load
-        }
+        tied = {name for name in eligible_names if self._normalized_load(name) == lowest_load}
         for offset in range(len(self._order)):
             index = (self._next_tie_index + offset) % len(self._order)
             name = self._order[index]

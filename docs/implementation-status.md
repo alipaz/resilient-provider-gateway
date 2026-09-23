@@ -16,6 +16,10 @@ bounded two-attempt retry and a per-process circuit breaker; per-process breaker
 state is a deliberate time-boxed design and is not shared through Redis. Step 5
 adds global admission backpressure, per-provider active-call bounds, and Redis
 token-bucket rate decisions before upstream execution.
+Step 6 adds compact asynchronous audit persistence through a bounded RabbitMQ
+queue, with Celery restricted to PostgreSQL persistence and no upstream calls.
+The initial audit migration was verified against isolated PostgreSQL 16 with a
+downgrade and re-upgrade round trip.
 
 ## Steps 1-10
 
@@ -24,7 +28,7 @@ token-bucket rate decisions before upstream execution.
 - [x] Step 3 — in-memory provider routing and process endpoint proxying.
 - [x] Step 4 — bounded retry, request deadline, and per-process circuit breaker.
 - [x] Step 5 — admission backpressure and Redis-backed provider rate limiting.
-- [ ] Step 6 — not implemented.
+- [x] Step 6 — asynchronous idempotent audit persistence.
 - [ ] Step 7 — not implemented.
 - [ ] Step 8 — not implemented.
 - [ ] Step 9 — not implemented.

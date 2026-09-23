@@ -8,8 +8,10 @@ _trace_id: ContextVar[str | None] = ContextVar("trace_id", default=None)
 def _validate_identifier(name: str, value: str | None) -> str:
     if value is None:
         return uuid4().hex
-    is_valid = value and len(value) <= 128 and all(
-        character.isalnum() or character in "-_." for character in value
+    is_valid = (
+        value
+        and len(value) <= 128
+        and all(character.isalnum() or character in "-_." for character in value)
     )
     if not is_valid:
         raise ValueError(

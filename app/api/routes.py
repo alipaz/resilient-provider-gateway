@@ -1,10 +1,15 @@
+from datetime import datetime, timezone
+from hashlib import sha256
+from json import dumps
 from time import perf_counter
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Body, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 
 from app.core.context import set_request_context
+from app.persistence.dispatch import dispatch_audit_event
 from app.providers.models import ProviderOutcome, ProviderRequestResult, ProviderResult
 from app.resilience.rate_limiter import RateLimiterUnavailable
 
@@ -13,6 +18,9 @@ router = APIRouter(prefix="/v1")
 
 @router.post("/process")
 async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSONResponse:
+    received_at = datetime.now(timezone.utc)
+    started_at = perf_counter()
+    audit_id = str(uuid4())
     try:
         request_id, trace_id = set_request_context(
             request.headers.get("X-Request-ID"),
@@ -30,10 +38,50 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
             content={"error": {"code": "admission_rejected"}},
             headers={"Retry-After": "1", "X-Request-ID": request_id, "X-Trace-ID": trace_id},
         )
+    response: JSONResponse | None = None
     try:
-        return await _proxy_request(request, payload, request_id, trace_id)
+        response = await _proxy_request(request, payload, request_id, trace_id)
+        return response
     finally:
         request.app.state.admission.release()
+        payload_bytes = dumps(payload, separators=(",", ":")).encode()
+        request_result = getattr(request.state, "provider_request_result", None)
+        attempts = (
+            []
+            if request_result is None
+            else [
+                {
+                    "request_id": audit_id,
+                    "provider": item.provider_name,
+                    "attempt_number": number,
+                    "started_at": received_at,
+                    "latency_ms": item.latency_ms,
+                    "http_status": item.status_code,
+                    "outcome": item.outcome.value,
+                    "error_class": item.error_class,
+                }
+                for number, item in enumerate(request_result.attempts, 1)
+            ]
+        )
+        dispatch_audit_event(
+            {
+                "request": {
+                    "id": audit_id,
+                    "trace_id": trace_id,
+                    "received_at": received_at,
+                    "completed_at": datetime.now(timezone.utc),
+                    "final_status": 500 if response is None else response.status_code,
+                    "selected_provider": None
+                    if response is None
+                    else response.headers.get("x-upstream-provider"),
+                    "total_latency_ms": (perf_counter() - started_at) * 1000,
+                    "payload_size": len(payload_bytes),
+                    "payload_sha256": sha256(payload_bytes).hexdigest(),
+                    "error_class": None,
+                },
+                "attempts": attempts,
+            }
+        )
 
 
 async def _proxy_request(
