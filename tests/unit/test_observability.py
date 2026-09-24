@@ -185,8 +185,7 @@ async def test_process_records_provider_attempt_metrics(
 
     assert response.status_code == 200
     assert (
-        provider_attempt_counter.labels("provider_a", "success")._value.get()
-        == before_attempts + 1
+        provider_attempt_counter.labels("provider_a", "success")._value.get() == before_attempts + 1
     )
     assert provider_duration.labels("provider_a")._sum.get() > before_duration_sum
     assert provider_inflight.labels("provider_a")._value.get() == 0

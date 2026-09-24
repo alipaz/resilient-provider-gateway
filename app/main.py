@@ -83,7 +83,13 @@ async def observe_request(request: Request, call_next):
             response = await call_next(request)
     except Exception:
         status_code = 500
-        raise
+        response = JSONResponse(
+            status_code=500,
+            content={"error": {"code": "internal_error"}},
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Trace-ID"] = trace_id
+        return response
     else:
         status_code = response.status_code
         response.headers["X-Request-ID"] = request_id
@@ -103,6 +109,7 @@ async def observe_request(request: Request, call_next):
             total_latency_ms=elapsed * 1000,
         )
         structlog.contextvars.clear_contextvars()
+
 
 app.include_router(router)
 

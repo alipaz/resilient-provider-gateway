@@ -15,12 +15,8 @@ class ProviderClient:
         self,
         config: ProviderConfig,
         payload: dict[str, Any],
-        timeout: float | None = None,
     ) -> ProviderResult:
         started_at = perf_counter()
-        request_options: dict[str, float] = {}
-        if timeout is not None:
-            request_options["timeout"] = timeout
         try:
             response = await self._http_client.post(
                 config.url,
@@ -29,7 +25,6 @@ class ProviderClient:
                     "X-Request-ID": get_request_id(),
                     "X-Trace-ID": get_trace_id(),
                 },
-                **request_options,
             )
         except httpx.TimeoutException:
             return self._result(config, started_at, None, ProviderOutcome.TIMEOUT, "timeout")

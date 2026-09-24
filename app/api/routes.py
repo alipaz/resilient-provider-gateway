@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 from hashlib import sha256
 from json import dumps
@@ -18,7 +19,12 @@ from app.observability.metrics import (
 )
 from app.persistence.dispatch import dispatch_audit_event
 from app.providers.circuit_breaker import CircuitState
-from app.providers.models import ProviderOutcome, ProviderRequestResult, ProviderResult
+from app.providers.models import (
+    ProviderAttempt,
+    ProviderOutcome,
+    ProviderRequestResult,
+    ProviderResult,
+)
 from app.resilience.rate_limiter import RateLimiterUnavailable
 
 router = APIRouter(prefix="/v1")
@@ -42,7 +48,19 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
         )
     response: JSONResponse | None = None
     try:
-        response = await _proxy_request(request, payload, request_id, trace_id)
+        try:
+            async with asyncio.timeout(request.app.state.settings.REQUEST_DEADLINE_SECONDS):
+                response = await _proxy_request(request, payload, request_id, trace_id)
+        except TimeoutError:
+            request_result = getattr(request.state, "provider_request_result", None)
+            headers = {"X-Request-ID": request_id, "X-Trace-ID": trace_id}
+            if request_result is not None and request_result.result is not None:
+                headers["X-Upstream-Provider"] = request_result.result.provider_name
+            response = JSONResponse(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                content={"error": {"code": "upstream_timeout"}},
+                headers=headers,
+            )
         return response
     finally:
         request.app.state.admission.release()
@@ -92,7 +110,6 @@ async def _proxy_request(
     request_id: str,
     trace_id: str,
 ) -> JSONResponse:
-    request_started_at = perf_counter()
     attempted_providers: set[str] = set()
     attempts = []
     result: ProviderResult | None = None
@@ -100,11 +117,6 @@ async def _proxy_request(
     rate_limited = False
     _update_circuit_metrics(request)
     while len(attempts) < 2:
-        remaining_seconds = request.app.state.settings.REQUEST_DEADLINE_SECONDS - (
-            perf_counter() - request_started_at
-        )
-        if remaining_seconds <= 0:
-            break
         eligible = {
             name
             for name in request.app.state.provider_router.provider_names
@@ -140,12 +152,42 @@ async def _proxy_request(
         provider_inflight.labels(provider.name).inc()
         attempt_started_at = perf_counter()
         try:
-            async with request.app.state.provider_semaphores[provider.name]:
-                result = await request.app.state.provider_client.process(
-                    provider,
-                    payload,
-                    timeout=remaining_seconds,
+            try:
+                async with request.app.state.provider_semaphores[provider.name]:
+                    result = await request.app.state.provider_client.process(
+                        provider,
+                        payload,
+                    )
+            except asyncio.CancelledError:
+                elapsed_ms = (perf_counter() - attempt_started_at) * 1000
+                result = ProviderResult(
+                    attempt=ProviderAttempt(
+                        provider_name=provider.name,
+                        status_code=None,
+                        latency_ms=elapsed_ms,
+                        outcome=ProviderOutcome.TIMEOUT,
+                        error_class="deadline_exceeded",
+                    ),
+                    response_json=None,
                 )
+                attempts.append(result.attempt)
+                request.state.provider_request_result = ProviderRequestResult(
+                    result=result,
+                    attempts=tuple(attempts),
+                )
+                provider_attempt_counter.labels(provider.name, result.outcome.value).inc()
+                provider_duration.labels(provider.name).observe(elapsed_ms / 1000)
+                logger.info(
+                    "provider_attempt_completed",
+                    provider=provider.name,
+                    attempt_number=len(attempts),
+                    outcome=result.outcome.value,
+                    upstream_status=result.status_code,
+                    latency_ms=elapsed_ms,
+                )
+                request.app.state.circuit_breaker.record(provider.name, failed=True)
+                _update_circuit_metrics(request)
+                raise
         finally:
             elapsed_ms = (perf_counter() - attempt_started_at) * 1000
             request.app.state.provider_router.finish_attempt(provider, elapsed_ms)

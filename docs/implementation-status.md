@@ -29,6 +29,9 @@ default mock runtime. Its A/B/C profiles provide seeded latency, rate-limit,
 5xx, and timeout behavior; integration tests route only to these local mocks.
 Step 9 packages the API, migration, worker, stateful dependencies, and local
 mock providers with Docker Compose, alongside reproducible Locust benchmarks.
+Step 10 finalizes the operator documentation and final audit: the README and
+architecture document describe the implemented contracts, boundaries, benchmark
+evidence, deployment commands, and demo-scale trade-offs.
 
 ## Steps 1-10
 
@@ -41,4 +44,4 @@ mock providers with Docker Compose, alongside reproducible Locust benchmarks.
 - [x] Step 7 — JSON logs, Prometheus metrics, and readiness checks.
 - [x] Step 8 — local mock providers and deterministic gateway integration coverage.
 - [x] Step 9 — Docker Compose stack and Locust benchmark harness.
-- [ ] Step 10 — not implemented.
+- [x] Step 10 — final documentation and verification audit.
