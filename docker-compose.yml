@@ -1,0 +1,128 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: gateway
+      POSTGRES_USER: gateway
+      POSTGRES_PASSWORD: gateway
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gateway -d gateway"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  rabbitmq:
+    image: rabbitmq:3.13-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: gateway
+      RABBITMQ_DEFAULT_PASS: gateway
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  provider-a:
+    image: zohal-api:latest
+    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      PROVIDER_NAME: provider_a
+      MOCK_SEED: 1
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  provider-b:
+    image: zohal-api:latest
+    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      PROVIDER_NAME: provider_b
+      MOCK_SEED: 2
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  provider-c:
+    image: zohal-api:latest
+    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    environment:
+      PROVIDER_NAME: provider_c
+      MOCK_SEED: 3
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  migrate:
+    image: zohal-api:latest
+    command: ["alembic", "upgrade", "head"]
+    environment: &gateway_environment
+      PROVIDER_MODE: ${PROVIDER_MODE:-mock}
+      PROVIDER_A_URL: ${PROVIDER_A_URL:-}
+      PROVIDER_B_URL: ${PROVIDER_B_URL:-}
+      PROVIDER_C_URL: ${PROVIDER_C_URL:-}
+      DATABASE_URL: postgresql+psycopg://gateway:gateway@postgres:5432/gateway
+      RABBITMQ_URL: amqp://gateway:gateway@rabbitmq:5672//
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    image: zohal-api:latest
+    ports:
+      - "8000:8000"
+    environment: *gateway_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      provider-a:
+        condition: service_healthy
+      provider-b:
+        condition: service_healthy
+      provider-c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  celery-worker:
+    image: zohal-api:latest
+    command: ["celery", "-A", "app.tasks.celery_app:celery_app", "worker", "--loglevel=INFO", "-Q", "audit"]
+    environment: *gateway_environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  rabbitmq_data:

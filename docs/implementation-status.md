@@ -27,6 +27,8 @@ without issuing per-request service queries.
 Step 8 adds one environment-configured local mock-provider application for the
 default mock runtime. Its A/B/C profiles provide seeded latency, rate-limit,
 5xx, and timeout behavior; integration tests route only to these local mocks.
+Step 9 packages the API, migration, worker, stateful dependencies, and local
+mock providers with Docker Compose, alongside reproducible Locust benchmarks.
 
 ## Steps 1-10
 
@@ -38,5 +40,5 @@ default mock runtime. Its A/B/C profiles provide seeded latency, rate-limit,
 - [x] Step 6 — asynchronous idempotent audit persistence.
 - [x] Step 7 — JSON logs, Prometheus metrics, and readiness checks.
 - [x] Step 8 — local mock providers and deterministic gateway integration coverage.
-- [ ] Step 9 — not implemented.
+- [x] Step 9 — Docker Compose stack and Locust benchmark harness.
 - [ ] Step 10 — not implemented.
