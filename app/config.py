@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     MAX_INFLIGHT: int = 200
     ADMISSION_WAIT_MS: int = 50
     REDIS_URL: str = "redis://localhost:6379/0"
+    RABBITMQ_URL: str = "amqp://guest:guest@localhost:5672//"
+    DATABASE_URL: str = "postgresql+psycopg://localhost/audit"
     PROVIDER_A_RATE_CAPACITY: int = 10
     PROVIDER_A_RATE_REFILL_RPS: float = 10.0
     PROVIDER_B_RATE_CAPACITY: int = 100
