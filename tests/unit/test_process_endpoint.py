@@ -6,9 +6,18 @@ import pytest
 import respx
 
 import app.api.routes as api_routes
+import app.main as main_module
+from app.config import ProviderMode
 from app.main import app
-from app.observability.metrics import provider_attempt_counter, provider_duration, request_counter
+from app.observability.metrics import (
+    provider_attempt_counter,
+    provider_duration,
+    provider_timeout_counter,
+    request_counter,
+)
 from app.providers.circuit_breaker import CircuitBreaker, CircuitState
+from app.providers.models import ProviderAttempt, ProviderOutcome, ProviderResult
+from app.providers.router import ProviderRouter
 from app.resilience.rate_limiter import RateLimitDecision, RateLimiterUnavailable
 
 
@@ -51,6 +60,34 @@ class FakeRateLimiter:
             allowed=self.decisions.get(provider_name, True),
             retry_after_seconds=1,
         )
+
+
+class PlannedRateLimiter:
+    def __init__(
+        self,
+        decisions: dict[str, RateLimitDecision] | None = None,
+        unavailable_for: set[str] | None = None,
+    ) -> None:
+        self.decisions = decisions or {}
+        self.unavailable_for = unavailable_for or set()
+        self.calls: list[str] = []
+
+    async def check(
+        self,
+        provider_name: str,
+        capacity: int,
+        refill_rate: float,
+    ) -> RateLimitDecision:
+        self.calls.append(provider_name)
+        if provider_name in self.unavailable_for:
+            raise RateLimiterUnavailable()
+        return self.decisions.get(provider_name, RateLimitDecision(True, 0))
+
+
+@pytest.fixture(autouse=True)
+def use_mock_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "PROVIDER_MODE", ProviderMode.MOCK)
+    monkeypatch.setattr("app.providers.router.random", lambda: 0.0)
 
 
 @pytest.fixture
@@ -153,6 +190,61 @@ async def test_process_returns_controlled_error_for_unexpected_client_failure(
 
 
 @pytest.mark.asyncio
+async def test_unexpected_provider_exception_counts_as_router_ewma_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def raise_unexpected(config: object, payload: object) -> None:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    async with app.router.lifespan_context(app):
+        provider_router = app.state.provider_router
+        monkeypatch.setattr(app.state.provider_client, "process", raise_unexpected)
+        app.state.rate_limiter = FakeRateLimiter()
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 500
+    assert response.json() == {"error": {"code": "internal_error"}}
+    assert provider_router.in_flight("provider_a") == 0
+    assert provider_router.ewma_error_rate("provider_a") == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status_code", "error_class", "expected_sample"),
+    [
+        (ProviderOutcome.SUCCESS, 200, None, 0.0),
+        (ProviderOutcome.CLIENT_ERROR, 400, None, 0.0),
+        (ProviderOutcome.CLIENT_ERROR, 429, None, 0.0),
+        (ProviderOutcome.SERVER_ERROR, 503, None, 0.5),
+        (ProviderOutcome.TIMEOUT, None, None, 1.0),
+        (ProviderOutcome.CONNECTION_ERROR, None, None, 1.0),
+        (ProviderOutcome.REQUEST_ERROR, None, "request_error", 1.0),
+        (ProviderOutcome.SUCCESS, None, "request_error", 1.0),
+    ],
+)
+def test_routing_error_sample_maps_provider_outcomes(
+    outcome: ProviderOutcome,
+    status_code: int | None,
+    error_class: str | None,
+    expected_sample: float,
+) -> None:
+    result = ProviderResult(
+        attempt=ProviderAttempt(
+            provider_name="provider_a",
+            status_code=status_code,
+            latency_ms=1.0,
+            outcome=outcome,
+            error_class=error_class,
+        ),
+        response_json=None,
+    )
+
+    assert api_routes._routing_error_sample(result) == expected_sample
+
+
+@pytest.mark.asyncio
 async def test_process_enforces_overall_request_deadline(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -161,6 +253,7 @@ async def test_process_enforces_overall_request_deadline(
     audit_events: list[dict] = []
     before_attempts = provider_attempt_counter.labels("provider_a", "timeout")._value.get()
     before_duration = provider_duration.labels("provider_a")._sum.get()
+    before_timeouts = provider_timeout_counter.labels("provider_a", "deadline")._value.get()
     monkeypatch.setattr(api_routes, "dispatch_audit_event", audit_events.append)
     async with app.router.lifespan_context(app):
         provider_router = app.state.provider_router
@@ -184,9 +277,14 @@ async def test_process_enforces_overall_request_deadline(
     assert response.headers["x-upstream-provider"] == "provider_a"
     assert slow_client.cancelled is True
     assert provider_router.in_flight("provider_a") == 0
+    assert provider_router.ewma_error_rate("provider_a") == pytest.approx(0.2)
     assert app.state.circuit_breaker.state("provider_a") is CircuitState.OPEN
     assert (
         provider_attempt_counter.labels("provider_a", "timeout")._value.get() == before_attempts + 1
+    )
+    assert (
+        provider_timeout_counter.labels("provider_a", "deadline")._value.get()
+        == before_timeouts + 1
     )
     assert provider_duration.labels("provider_a")._sum.get() > before_duration
     assert len(audit_events) == 1
@@ -210,6 +308,39 @@ async def test_process_enforces_overall_request_deadline(
     assert provider_event["provider"] == "provider_a"
     assert provider_event["outcome"] == "timeout"
     assert provider_event["upstream_status"] is None
+    assert provider_event["error_class"] == "deadline_exceeded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("timeout", "timeout_type"),
+    [
+        (httpx.PoolTimeout("pool timed out"), "pool"),
+        (httpx.ConnectTimeout("connect timed out"), "connect"),
+        (httpx.ReadTimeout("read timed out"), "read"),
+        (httpx.WriteTimeout("write timed out"), "write"),
+        (httpx.TimeoutException("timed out"), "other"),
+    ],
+)
+async def test_process_records_each_timeout_phase_once(
+    api_client: httpx.AsyncClient,
+    respx_mock: respx.MockRouter,
+    timeout: httpx.TimeoutException,
+    timeout_type: str,
+) -> None:
+    before_timeouts = provider_timeout_counter.labels("provider_a", timeout_type)._value.get()
+    respx_mock.post("http://provider-a:8000/v1/process").mock(side_effect=timeout)
+    respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    response = await api_client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 200
+    assert (
+        provider_timeout_counter.labels("provider_a", timeout_type)._value.get()
+        == before_timeouts + 1
+    )
 
 
 @pytest.mark.asyncio
@@ -257,6 +388,47 @@ async def test_process_retries_retryable_failure_with_a_different_provider(
 
     assert response.status_code == 200
     assert response.json() == {"provider": "b"}
+    assert response.headers["x-upstream-provider"] == "provider_b"
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_upstream_429_cools_provider_without_reducing_reliability(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    now = 100.0
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(429, headers={"Retry-After": "90"}, json={"detail": "busy"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    async with app.router.lifespan_context(app):
+        app.state.provider_router = ProviderRouter(
+            app.state.settings.provider_configs,
+            max_concurrency={
+                config.name: app.state.settings.provider_max_concurrent(config.name)
+                for config in app.state.settings.provider_configs
+            },
+            clock=lambda: now,
+            random_value=lambda: 0.0,
+        )
+        app.state.rate_limiter = FakeRateLimiter()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+        provider_router = app.state.provider_router
+        assert provider_router.routing_weight("provider_a") == 0.0
+        assert provider_router.ewma_error_rate("provider_a") == 0.0
+        now = 160.0
+        assert provider_router.routing_weight("provider_a") > 0.0
+
+    assert response.status_code == 200
     assert response.headers["x-upstream-provider"] == "provider_b"
     assert len(provider_a.calls) == 1
     assert len(provider_b.calls) == 1
@@ -347,6 +519,127 @@ async def test_process_falls_back_after_a_provider_rate_limit_denial(
     assert response.status_code == 200
     assert response.headers["x-upstream-provider"] == "provider_b"
     assert len(provider_b.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_process_marks_provider_cooldown_after_rate_limit_denial(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    limiter = PlannedRateLimiter(
+        {
+            "provider_a": RateLimitDecision(False, 7),
+            "provider_b": RateLimitDecision(True, 0),
+        }
+    )
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    async with app.router.lifespan_context(app):
+        app.state.rate_limiter = limiter
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+        assert app.state.provider_router.is_rate_limited("provider_a") is True
+
+    assert response.status_code == 200
+    assert limiter.calls == ["provider_a", "provider_b"]
+
+
+@pytest.mark.asyncio
+async def test_process_uses_retry_budget_before_second_upstream_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    limiter = PlannedRateLimiter()
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(503, json={"detail": "unavailable"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process").mock(
+        return_value=httpx.Response(200, json={"provider": "b"})
+    )
+
+    async with app.router.lifespan_context(app):
+        app.state.rate_limiter = limiter
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 200
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 1
+    assert limiter.calls == ["provider_a", "provider_b", "retry_budget"]
+
+
+@pytest.mark.asyncio
+async def test_process_returns_first_result_when_retry_budget_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    limiter = PlannedRateLimiter({"retry_budget": RateLimitDecision(False, 1)})
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(503, json={"detail": "unavailable"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process")
+
+    async with app.router.lifespan_context(app):
+        app.state.rate_limiter = limiter
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert response.headers["x-upstream-provider"] == "provider_a"
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 0
+    assert limiter.calls == ["provider_a", "provider_b", "retry_budget"]
+
+
+@pytest.mark.asyncio
+async def test_process_returns_first_result_when_retry_budget_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    respx_mock: respx.MockRouter,
+) -> None:
+    limiter = PlannedRateLimiter(unavailable_for={"retry_budget"})
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    provider_a = respx_mock.post("http://provider-a:8000/v1/process").mock(
+        return_value=httpx.Response(503, json={"detail": "unavailable"})
+    )
+    provider_b = respx_mock.post("http://provider-b:8000/v1/process")
+
+    async with app.router.lifespan_context(app):
+        app.state.rate_limiter = limiter
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert response.headers["x-upstream-provider"] == "provider_a"
+    assert len(provider_a.calls) == 1
+    assert len(provider_b.calls) == 0
+    assert limiter.calls == ["provider_a", "provider_b", "retry_budget"]
+
+
+@pytest.mark.asyncio
+async def test_process_maps_router_exhaustion_to_controlled_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", lambda event: True)
+    async with app.router.lifespan_context(app):
+        for provider_name in app.state.provider_router.provider_names:
+            app.state.provider_router.mark_rate_limited(provider_name, retry_after_seconds=10)
+        app.state.rate_limiter = PlannedRateLimiter()
+        transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post("/v1/process", json={"value": "hello"})
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "no_provider_available"
 
 
 @pytest.mark.asyncio

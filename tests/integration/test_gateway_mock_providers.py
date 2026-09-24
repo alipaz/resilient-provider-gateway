@@ -5,6 +5,8 @@ from typing import AsyncIterator
 import httpx
 import pytest
 
+import app.main as main_module
+from app.config import ProviderMode
 from app.main import app
 from app.providers.circuit_breaker import CircuitBreaker, CircuitState
 from app.providers.client import ProviderClient
@@ -13,6 +15,12 @@ from app.resilience.rate_limiter import RateLimitDecision
 from mock_provider.main import MockProviderSettings, create_app
 
 pytestmark = pytest.mark.integration
+
+
+@pytest.fixture(autouse=True)
+def use_mock_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "PROVIDER_MODE", ProviderMode.MOCK)
+    monkeypatch.setattr("app.providers.router.random", lambda: 0.0)
 
 
 class AllowingRateLimiter:

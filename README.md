@@ -10,10 +10,10 @@ metrics, deterministic local mocks, Docker Compose, and Locust benchmarking.
 - Docker Desktop with Docker Compose v2.
 - Python 3.12 and a project virtual environment for local tests and Locust.
 
-Start the complete local mock stack:
+Start the complete stack against the supplied real external providers:
 
 ```sh
-docker compose up --build
+docker compose up --build -d
 ```
 
 When the API is healthy, send a sample JSON object:
@@ -26,7 +26,8 @@ curl -i http://localhost:8000/v1/process \
   --data '{"value":"hello"}'
 ```
 
-The API is `http://localhost:8000`; mocks are Compose-network-only. Stop with
+The API is `http://localhost:8000`; the default request path uses the three
+supplied external providers. Mock containers remain Compose-network-only. Stop with
 `docker compose down` (use `-v` only when intentionally removing local state).
 Use the supplied external endpoints with:
 
@@ -43,10 +44,11 @@ provider URLs always take precedence over mode-derived URLs.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PROVIDER_MODE` | `mock` | `mock` resolves the Docker A/B/C providers; `external` resolves the supplied endpoints. |
+| `PROVIDER_MODE` | `external` | `external` resolves the supplied endpoints; `mock` still resolves the Docker A/B/C providers. |
 | `PROVIDER_A_URL`, `PROVIDER_B_URL`, `PROVIDER_C_URL` | unset | Explicit per-provider override; final precedence layer. |
 | `PROVIDER_CONNECT_TIMEOUT_SECONDS` | `2` | Upstream connect timeout. |
 | `PROVIDER_READ_TIMEOUT_SECONDS`, `PROVIDER_WRITE_TIMEOUT_SECONDS`, `PROVIDER_POOL_TIMEOUT_SECONDS` | `10`, `10`, `2` | Explicit read/write/pool timeouts. |
+| `HTTP_MAX_CONNECTIONS`, `HTTP_MAX_KEEPALIVE_CONNECTIONS` | `200`, `100` | Shared HTTPX connection-pool and keepalive limits. |
 | `REQUEST_DEADLINE_SECONDS` | `15` | Shared budget for both permitted attempts. |
 | `MAX_INFLIGHT`, `ADMISSION_WAIT_MS` | `200`, `50` | Global concurrency and bounded admission wait. |
 | `REDIS_URL` | `redis://localhost:6379/0` | Provider token buckets and readiness. |
@@ -55,8 +57,8 @@ provider URLs always take precedence over mode-derived URLs.
 | `PROVIDER_{A,B,C}_RATE_CAPACITY`, `PROVIDER_{A,B,C}_RATE_REFILL_RPS` | A `10`/`10`; B/C `100`/`100` | Redis token-bucket capacity/refill per provider. |
 | `PROVIDER_{A,B,C}_MAX_CONCURRENT` | A `10`; B/C `100` | In-process upstream-call limit per provider. |
 
-`.env.example` deliberately defaults to mock mode. `.env.external.example`
-sets external mode and the supplied URL overrides; deployment-specific explicit
+`.env.example` defaults to external mode. `.env.external.example` remains
+available with the supplied URL overrides; deployment-specific explicit
 `PROVIDER_*_URL` values still win.
 
 ## API contract

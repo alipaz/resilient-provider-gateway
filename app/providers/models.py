@@ -31,6 +31,7 @@ class ProviderAttempt:
 class ProviderResult:
     attempt: ProviderAttempt
     response_json: dict[str, Any] | None
+    retry_after_seconds: int | None = None
 
     @property
     def provider_name(self) -> str:

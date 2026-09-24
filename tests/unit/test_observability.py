@@ -8,6 +8,7 @@ import structlog
 
 import app.api.routes as api_routes
 import app.main as main_module
+from app.config import ProviderMode
 from app.core.context import set_request_context as real_set_request_context
 from app.main import app
 from app.observability.logging import configure_logging
@@ -17,6 +18,7 @@ from app.observability.metrics import (
     provider_attempt_counter,
     provider_duration,
     provider_inflight,
+    provider_timeout_counter,
     rate_limit_rejections,
     request_counter,
 )
@@ -36,6 +38,12 @@ class AllowingRateLimiter:
         refill_rate: float,
     ) -> RateLimitDecision:
         return RateLimitDecision(allowed=True, retry_after_seconds=0)
+
+
+@pytest.fixture(autouse=True)
+def use_mock_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "PROVIDER_MODE", ProviderMode.MOCK)
+    monkeypatch.setattr("app.providers.router.random", lambda: 0.0)
 
 
 @pytest.mark.asyncio
@@ -117,6 +125,7 @@ def test_metrics_have_only_bounded_labels() -> None:
     assert provider_attempt_counter._labelnames == ("provider", "outcome")
     assert provider_duration._labelnames == ("provider",)
     assert provider_inflight._labelnames == ("provider",)
+    assert provider_timeout_counter._labelnames == ("provider", "timeout_type")
     assert circuit_state._labelnames == ("provider",)
     assert rate_limit_rejections._labelnames == ("scope", "provider")
     assert persistence_dispatch_failures._labelnames == ()

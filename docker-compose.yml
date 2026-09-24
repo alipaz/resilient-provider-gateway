@@ -74,7 +74,7 @@ services:
     image: zohal-api:latest
     command: ["alembic", "upgrade", "head"]
     environment: &gateway_environment
-      PROVIDER_MODE: ${PROVIDER_MODE:-mock}
+      PROVIDER_MODE: ${PROVIDER_MODE:-external}
       PROVIDER_A_URL: ${PROVIDER_A_URL:-}
       PROVIDER_B_URL: ${PROVIDER_B_URL:-}
       PROVIDER_C_URL: ${PROVIDER_C_URL:-}

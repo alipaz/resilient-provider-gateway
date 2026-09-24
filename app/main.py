@@ -34,12 +34,22 @@ async def lifespan(app: FastAPI):
         write=settings.PROVIDER_WRITE_TIMEOUT_SECONDS,
         pool=settings.PROVIDER_POOL_TIMEOUT_SECONDS,
     )
+    limits = httpx.Limits(
+        max_connections=settings.HTTP_MAX_CONNECTIONS,
+        max_keepalive_connections=settings.HTTP_MAX_KEEPALIVE_CONNECTIONS,
+    )
     redis_client = redis_asyncio.from_url(settings.REDIS_URL)
-    async with httpx.AsyncClient(timeout=timeout) as http_client:
+    async with httpx.AsyncClient(timeout=timeout, limits=limits) as http_client:
         app.state.settings = settings
         app.state.admission = AdmissionController(settings.MAX_INFLIGHT, settings.ADMISSION_WAIT_MS)
         app.state.provider_client = ProviderClient(http_client)
-        app.state.provider_router = ProviderRouter(settings.provider_configs)
+        app.state.provider_router = ProviderRouter(
+            settings.provider_configs,
+            max_concurrency={
+                config.name: settings.provider_max_concurrent(config.name)
+                for config in settings.provider_configs
+            },
+        )
         app.state.circuit_breaker = CircuitBreaker(
             tuple(config.name for config in settings.provider_configs)
         )

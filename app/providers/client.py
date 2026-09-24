@@ -26,6 +26,20 @@ class ProviderClient:
                     "X-Trace-ID": get_trace_id(),
                 },
             )
+        except httpx.PoolTimeout:
+            return self._result(config, started_at, None, ProviderOutcome.TIMEOUT, "pool_timeout")
+        except httpx.ConnectTimeout:
+            return self._result(
+                config,
+                started_at,
+                None,
+                ProviderOutcome.TIMEOUT,
+                "connect_timeout",
+            )
+        except httpx.ReadTimeout:
+            return self._result(config, started_at, None, ProviderOutcome.TIMEOUT, "read_timeout")
+        except httpx.WriteTimeout:
+            return self._result(config, started_at, None, ProviderOutcome.TIMEOUT, "write_timeout")
         except httpx.TimeoutException:
             return self._result(config, started_at, None, ProviderOutcome.TIMEOUT, "timeout")
         except httpx.ConnectError:
@@ -77,6 +91,11 @@ class ProviderClient:
                 ProviderOutcome.CLIENT_ERROR,
                 "upstream_4xx",
                 response_json,
+                retry_after_seconds=(
+                    self._retry_after_seconds(response.headers.get("Retry-After"))
+                    if response.status_code == 429
+                    else None
+                ),
             )
         if 500 <= response.status_code < 600:
             return self._result(
@@ -103,6 +122,7 @@ class ProviderClient:
         outcome: ProviderOutcome,
         error_class: str | None,
         response_json: dict[str, Any] | None = None,
+        retry_after_seconds: int | None = None,
     ) -> ProviderResult:
         return ProviderResult(
             attempt=ProviderAttempt(
@@ -113,4 +133,14 @@ class ProviderClient:
                 error_class=error_class,
             ),
             response_json=response_json,
+            retry_after_seconds=retry_after_seconds,
         )
+
+    @staticmethod
+    def _retry_after_seconds(value: str | None) -> int:
+        """Parse Retry-After delta-seconds only; dates use the one-second default."""
+        try:
+            seconds = int(value) if value is not None else 0
+        except ValueError:
+            seconds = 0
+        return min(60, seconds) if seconds > 0 else 1

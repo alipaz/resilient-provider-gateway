@@ -15,7 +15,9 @@ from app.observability.metrics import (
     provider_attempt_counter,
     provider_duration,
     provider_inflight,
+    provider_timeout_counter,
     rate_limit_rejections,
+    retry_budget_exhausted,
 )
 from app.persistence.dispatch import dispatch_audit_event
 from app.providers.circuit_breaker import CircuitState
@@ -125,7 +127,10 @@ async def _proxy_request(
         }
         if not eligible:
             break
-        provider = request.app.state.provider_router.select(eligible=eligible)
+        try:
+            provider = request.app.state.provider_router.select(eligible=eligible)
+        except LookupError:
+            break
         if not request.app.state.circuit_breaker.allow(provider.name):
             attempted_providers.add(provider.name)
             continue
@@ -146,11 +151,28 @@ async def _proxy_request(
         if not rate_decision.allowed:
             rate_limited = True
             rate_limit_rejections.labels("provider", provider.name).inc()
+            request.app.state.provider_router.mark_rate_limited(
+                provider.name,
+                rate_decision.retry_after_seconds,
+            )
             continue
+        if attempts:
+            try:
+                retry_budget = await request.app.state.rate_limiter.check(
+                    "retry_budget",
+                    capacity=request.app.state.settings.RETRY_BUDGET_CAPACITY,
+                    refill_rate=request.app.state.settings.RETRY_BUDGET_REFILL_RPS,
+                )
+            except RateLimiterUnavailable:
+                break
+            if not retry_budget.allowed:
+                retry_budget_exhausted.inc()
+                break
         provider_name = provider.name
         request.app.state.provider_router.start_attempt(provider)
         provider_inflight.labels(provider.name).inc()
         attempt_started_at = perf_counter()
+        attempt_error_sample = 1.0
         try:
             try:
                 async with request.app.state.provider_semaphores[provider.name]:
@@ -158,6 +180,7 @@ async def _proxy_request(
                         provider,
                         payload,
                     )
+                attempt_error_sample = _routing_error_sample(result)
             except asyncio.CancelledError:
                 elapsed_ms = (perf_counter() - attempt_started_at) * 1000
                 result = ProviderResult(
@@ -177,6 +200,7 @@ async def _proxy_request(
                 )
                 provider_attempt_counter.labels(provider.name, result.outcome.value).inc()
                 provider_duration.labels(provider.name).observe(elapsed_ms / 1000)
+                provider_timeout_counter.labels(provider.name, "deadline").inc()
                 logger.info(
                     "provider_attempt_completed",
                     provider=provider.name,
@@ -184,17 +208,32 @@ async def _proxy_request(
                     outcome=result.outcome.value,
                     upstream_status=result.status_code,
                     latency_ms=elapsed_ms,
+                    error_class=result.error_class,
                 )
                 request.app.state.circuit_breaker.record(provider.name, failed=True)
                 _update_circuit_metrics(request)
                 raise
         finally:
             elapsed_ms = (perf_counter() - attempt_started_at) * 1000
-            request.app.state.provider_router.finish_attempt(provider, elapsed_ms)
+            request.app.state.provider_router.finish_attempt(
+                provider,
+                elapsed_ms,
+                error_sample=attempt_error_sample,
+            )
             provider_inflight.labels(provider.name).dec()
         attempts.append(result.attempt)
+        if result.status_code == status.HTTP_429_TOO_MANY_REQUESTS:
+            request.app.state.provider_router.mark_rate_limited(
+                provider.name,
+                result.retry_after_seconds or 1,
+            )
         provider_attempt_counter.labels(provider.name, result.outcome.value).inc()
         provider_duration.labels(provider.name).observe(elapsed_ms / 1000)
+        if result.outcome is ProviderOutcome.TIMEOUT:
+            provider_timeout_counter.labels(
+                provider.name,
+                _timeout_metric_label(result.error_class),
+            ).inc()
         logger.info(
             "provider_attempt_completed",
             provider=provider.name,
@@ -202,6 +241,7 @@ async def _proxy_request(
             outcome=result.outcome.value,
             upstream_status=result.status_code,
             latency_ms=elapsed_ms,
+            error_class=result.error_class,
         )
         request.app.state.circuit_breaker.record(
             provider.name,
@@ -278,6 +318,28 @@ def _is_circuit_failure(result: ProviderResult) -> bool:
         }
         or result.error_class == "request_error"
     )
+
+
+def _routing_error_sample(result: ProviderResult) -> float:
+    if result.error_class == "request_error" or result.outcome in {
+        ProviderOutcome.TIMEOUT,
+        ProviderOutcome.CONNECTION_ERROR,
+        ProviderOutcome.REQUEST_ERROR,
+    }:
+        return 1.0
+    if result.outcome is ProviderOutcome.SERVER_ERROR:
+        return 0.5
+    return 0.0
+
+
+def _timeout_metric_label(error_class: str | None) -> str:
+    return {
+        "pool_timeout": "pool",
+        "connect_timeout": "connect",
+        "read_timeout": "read",
+        "write_timeout": "write",
+        "deadline_exceeded": "deadline",
+    }.get(error_class, "other")
 
 
 def _update_circuit_metrics(request: Request) -> None:

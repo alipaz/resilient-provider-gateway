@@ -6,6 +6,11 @@ provider_attempt_counter = Counter(
     "provider_attempts_total", "Provider attempts", ["provider", "outcome"]
 )
 provider_duration = Histogram("provider_duration_seconds", "Provider duration", ["provider"])
+provider_timeout_counter = Counter(
+    "provider_timeouts_total",
+    "Provider timeouts",
+    ["provider", "timeout_type"],
+)
 provider_inflight = Gauge("provider_inflight", "Provider inflight", ["provider"])
 circuit_state = Gauge("circuit_state", "Circuit state", ["provider"])
 rate_limit_rejections = Counter(
@@ -14,3 +19,4 @@ rate_limit_rejections = Counter(
 persistence_dispatch_failures = Counter(
     "persistence_dispatch_failures_total", "Persistence dispatch failures"
 )
+retry_budget_exhausted = Counter("retry_budget_exhausted_total", "Exhausted retry budget")
