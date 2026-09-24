@@ -59,3 +59,10 @@ class ProviderRateLimiter:
         except Exception as error:
             raise RateLimiterUnavailable() from error
         return RateLimitDecision(allowed=bool(int(result[0])), retry_after_seconds=int(result[1]))
+
+    async def is_available(self) -> bool:
+        try:
+            await self._redis_client.ping()
+        except Exception:
+            return False
+        return True

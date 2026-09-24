@@ -1,12 +1,13 @@
 import structlog
 
+from app.observability.metrics import persistence_dispatch_failures
 from app.tasks.persist_audit import persist_audit
 
 logger = structlog.get_logger()
 
 
 def record_persistence_failure(reason: str) -> None:
-    return None
+    persistence_dispatch_failures.inc()
 
 
 def dispatch_audit_event(event: dict, task=persist_audit) -> bool:

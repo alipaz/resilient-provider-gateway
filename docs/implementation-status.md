@@ -20,6 +20,10 @@ Step 6 adds compact asynchronous audit persistence through a bounded RabbitMQ
 queue, with Celery restricted to PostgreSQL persistence and no upstream calls.
 The initial audit migration was verified against isolated PostgreSQL 16 with a
 downgrade and re-upgrade round trip.
+Step 7 adds per-process JSON logging, bounded-label Prometheus metrics, and
+lightweight liveness/readiness checks. Redis readiness performs only a
+connectivity ping; RabbitMQ and PostgreSQL readiness report configured presence
+without issuing per-request service queries.
 
 ## Steps 1-10
 
@@ -29,7 +33,7 @@ downgrade and re-upgrade round trip.
 - [x] Step 4 — bounded retry, request deadline, and per-process circuit breaker.
 - [x] Step 5 — admission backpressure and Redis-backed provider rate limiting.
 - [x] Step 6 — asynchronous idempotent audit persistence.
-- [ ] Step 7 — not implemented.
+- [x] Step 7 — JSON logs, Prometheus metrics, and readiness checks.
 - [ ] Step 8 — not implemented.
 - [ ] Step 9 — not implemented.
 - [ ] Step 10 — not implemented.

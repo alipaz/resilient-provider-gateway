@@ -5,15 +5,24 @@ from time import perf_counter
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Body, HTTPException, Request, status
+import structlog
+from fastapi import APIRouter, Body, Request, status
 from fastapi.responses import JSONResponse
 
-from app.core.context import set_request_context
+from app.observability.metrics import (
+    circuit_state,
+    provider_attempt_counter,
+    provider_duration,
+    provider_inflight,
+    rate_limit_rejections,
+)
 from app.persistence.dispatch import dispatch_audit_event
+from app.providers.circuit_breaker import CircuitState
 from app.providers.models import ProviderOutcome, ProviderRequestResult, ProviderResult
 from app.resilience.rate_limiter import RateLimiterUnavailable
 
 router = APIRouter(prefix="/v1")
+logger = structlog.get_logger()
 
 
 @router.post("/process")
@@ -21,18 +30,11 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
     received_at = datetime.now(timezone.utc)
     started_at = perf_counter()
     audit_id = str(uuid4())
-    try:
-        request_id, trace_id = set_request_context(
-            request.headers.get("X-Request-ID"),
-            request.headers.get("X-Trace-ID"),
-        )
-    except ValueError as error:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(error),
-        ) from error
+    request_id = request.state.request_id
+    trace_id = request.state.trace_id
 
     if not await request.app.state.admission.acquire():
+        rate_limit_rejections.labels("admission", "global").inc()
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             content={"error": {"code": "admission_rejected"}},
@@ -96,6 +98,7 @@ async def _proxy_request(
     result: ProviderResult | None = None
     provider_name: str | None = None
     rate_limited = False
+    _update_circuit_metrics(request)
     while len(attempts) < 2:
         remaining_seconds = request.app.state.settings.REQUEST_DEADLINE_SECONDS - (
             perf_counter() - request_started_at
@@ -130,9 +133,11 @@ async def _proxy_request(
             )
         if not rate_decision.allowed:
             rate_limited = True
+            rate_limit_rejections.labels("provider", provider.name).inc()
             continue
         provider_name = provider.name
         request.app.state.provider_router.start_attempt(provider)
+        provider_inflight.labels(provider.name).inc()
         attempt_started_at = perf_counter()
         try:
             async with request.app.state.provider_semaphores[provider.name]:
@@ -144,11 +149,23 @@ async def _proxy_request(
         finally:
             elapsed_ms = (perf_counter() - attempt_started_at) * 1000
             request.app.state.provider_router.finish_attempt(provider, elapsed_ms)
+            provider_inflight.labels(provider.name).dec()
         attempts.append(result.attempt)
+        provider_attempt_counter.labels(provider.name, result.outcome.value).inc()
+        provider_duration.labels(provider.name).observe(elapsed_ms / 1000)
+        logger.info(
+            "provider_attempt_completed",
+            provider=provider.name,
+            attempt_number=len(attempts),
+            outcome=result.outcome.value,
+            upstream_status=result.status_code,
+            latency_ms=elapsed_ms,
+        )
         request.app.state.circuit_breaker.record(
             provider.name,
             failed=_is_circuit_failure(result),
         )
+        _update_circuit_metrics(request)
         if not _is_retryable(result):
             break
 
@@ -219,3 +236,14 @@ def _is_circuit_failure(result: ProviderResult) -> bool:
         }
         or result.error_class == "request_error"
     )
+
+
+def _update_circuit_metrics(request: Request) -> None:
+    values = {
+        CircuitState.CLOSED: 0,
+        CircuitState.HALF_OPEN: 0.5,
+        CircuitState.OPEN: 1,
+    }
+    for provider_name in request.app.state.provider_router.provider_names:
+        state = request.app.state.circuit_breaker.state(provider_name)
+        circuit_state.labels(provider_name).set(values[state])
