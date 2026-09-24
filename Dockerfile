@@ -22,7 +22,6 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --chown=gateway:gateway alembic ./alembic
 COPY --chown=gateway:gateway alembic.ini ./alembic.ini
 COPY --chown=gateway:gateway app ./app
-COPY --chown=gateway:gateway mock_provider ./mock_provider
 
 USER gateway
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

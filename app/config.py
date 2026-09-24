@@ -1,4 +1,3 @@
-from enum import StrEnum
 from typing import Self
 
 from pydantic import Field, model_validator
@@ -7,13 +6,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from app.providers.models import ProviderConfig
 
 
-class ProviderMode(StrEnum):
-    MOCK = "mock"
-    EXTERNAL = "external"
-
-
 class Settings(BaseSettings):
-    PROVIDER_MODE: ProviderMode = ProviderMode.EXTERNAL
     PROVIDER_A_URL: str | None = None
     PROVIDER_B_URL: str | None = None
     PROVIDER_C_URL: str | None = None
@@ -55,26 +48,17 @@ class Settings(BaseSettings):
 
     @property
     def provider_configs(self) -> tuple[ProviderConfig, ProviderConfig, ProviderConfig]:
-        urls = self._mode_urls()
+        urls = (
+            "http://provider.example.invalid:8001/v1/process",
+            "http://provider.example.invalid:8002/v1/process",
+            "http://provider.example.invalid:8003/v1/process",
+        )
         overrides = (self.PROVIDER_A_URL, self.PROVIDER_B_URL, self.PROVIDER_C_URL)
         names = ("provider_a", "provider_b", "provider_c")
         return tuple(
             ProviderConfig(name=name, url=override or url)
             for name, url, override in zip(names, urls, overrides, strict=True)
         )  # type: ignore[return-value]
-
-    def _mode_urls(self) -> tuple[str, str, str]:
-        if self.PROVIDER_MODE is ProviderMode.EXTERNAL:
-            return (
-                "http://provider.example.invalid:8001/v1/process",
-                "http://provider.example.invalid:8002/v1/process",
-                "http://provider.example.invalid:8003/v1/process",
-            )
-        return (
-            "http://provider-a:8000/v1/process",
-            "http://provider-b:8000/v1/process",
-            "http://provider-c:8000/v1/process",
-        )
 
     def provider_rate_limit(self, provider_name: str) -> tuple[int, float]:
         limits = {

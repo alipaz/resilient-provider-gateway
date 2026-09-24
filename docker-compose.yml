@@ -34,50 +34,13 @@ services:
     volumes:
       - rabbitmq_data:/var/lib/rabbitmq
 
-  provider-a:
-    image: zohal-api:latest
-    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      PROVIDER_NAME: provider_a
-      MOCK_SEED: 1
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-
-  provider-b:
-    image: zohal-api:latest
-    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      PROVIDER_NAME: provider_b
-      MOCK_SEED: 2
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-
-  provider-c:
-    image: zohal-api:latest
-    command: ["uvicorn", "mock_provider.main:app", "--host", "0.0.0.0", "--port", "8000"]
-    environment:
-      PROVIDER_NAME: provider_c
-      MOCK_SEED: 3
-    healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/openapi.json')\""]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-
   migrate:
     image: zohal-api:latest
     command: ["alembic", "upgrade", "head"]
     environment: &gateway_environment
-      PROVIDER_MODE: ${PROVIDER_MODE:-external}
-      PROVIDER_A_URL: ${PROVIDER_A_URL:-}
-      PROVIDER_B_URL: ${PROVIDER_B_URL:-}
-      PROVIDER_C_URL: ${PROVIDER_C_URL:-}
+      PROVIDER_A_URL: "${PROVIDER_A_URL:-http://provider.example.invalid:8001/v1/process}"
+      PROVIDER_B_URL: "${PROVIDER_B_URL:-http://provider.example.invalid:8002/v1/process}"
+      PROVIDER_C_URL: "${PROVIDER_C_URL:-http://provider.example.invalid:8003/v1/process}"
       DATABASE_URL: postgresql+psycopg://gateway:gateway@postgres:5432/gateway
       RABBITMQ_URL: amqp://gateway:gateway@rabbitmq:5672//
       REDIS_URL: redis://redis:6379/0
@@ -98,12 +61,6 @@ services:
       redis:
         condition: service_healthy
       rabbitmq:
-        condition: service_healthy
-      provider-a:
-        condition: service_healthy
-      provider-b:
-        condition: service_healthy
-      provider-c:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')\""]

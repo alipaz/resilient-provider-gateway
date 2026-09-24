@@ -3,7 +3,7 @@
 This FastAPI gateway proxies JSON-object requests to three providers. It includes
 load-aware routing, bounded retries, in-process circuits, Redis rate limiting,
 backpressure, asynchronous PostgreSQL audit persistence, JSON logs, Prometheus
-metrics, deterministic local mocks, Docker Compose, and Locust benchmarking.
+metrics, Docker Compose, and Locust benchmarking.
 
 ## Prerequisites and startup
 
@@ -27,24 +27,17 @@ curl -i http://localhost:8000/v1/process \
 ```
 
 The API is `http://localhost:8000`; the default request path uses the three
-supplied external providers. Mock containers remain Compose-network-only. Stop with
-`docker compose down` (use `-v` only when intentionally removing local state).
-Use the supplied external endpoints with:
-
-```sh
-docker compose --env-file .env.external.example up --build
-```
-
-The mock containers remain running but are unused in external mode.
+supplied external providers. Stop with `docker compose down` (use `-v` only
+when intentionally removing local state). Explicit provider URL variables can
+override the supplied defaults for a deployment-specific endpoint.
 
 ## Configuration
 
 Settings load from the environment (or an uncommitted local `.env`). Explicit
-provider URLs always take precedence over mode-derived URLs.
+provider URLs always take precedence over the supplied external defaults.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PROVIDER_MODE` | `external` | `external` resolves the supplied endpoints; `mock` still resolves the Docker A/B/C providers. |
 | `PROVIDER_A_URL`, `PROVIDER_B_URL`, `PROVIDER_C_URL` | unset | Explicit per-provider override; final precedence layer. |
 | `PROVIDER_CONNECT_TIMEOUT_SECONDS` | `2` | Upstream connect timeout. |
 | `PROVIDER_READ_TIMEOUT_SECONDS`, `PROVIDER_WRITE_TIMEOUT_SECONDS`, `PROVIDER_POOL_TIMEOUT_SECONDS` | `10`, `10`, `2` | Explicit read/write/pool timeouts. |
@@ -57,9 +50,8 @@ provider URLs always take precedence over mode-derived URLs.
 | `PROVIDER_{A,B,C}_RATE_CAPACITY`, `PROVIDER_{A,B,C}_RATE_REFILL_RPS` | A `10`/`10`; B/C `100`/`100` | Redis token-bucket capacity/refill per provider. |
 | `PROVIDER_{A,B,C}_MAX_CONCURRENT` | A `10`; B/C `100` | In-process upstream-call limit per provider. |
 
-`.env.example` defaults to external mode. `.env.external.example` remains
-available with the supplied URL overrides; deployment-specific explicit
-`PROVIDER_*_URL` values still win.
+The three supplied external URLs are built-in defaults. `.env.external.example`
+lists the same explicit overrides for deployments that require them.
 
 ## API contract
 
@@ -98,11 +90,18 @@ flowchart LR
     API -->|/metrics| M[Prometheus scraper]
 ```
 
-The router selects the least normalized in-flight load (in-flight count times
-EWMA latency), using round-robin to break ties. A request makes at most two
-attempts, never to the same provider. It retries only timeout, network failure,
-HTTP 429, or 5xx; other 4xx responses return directly. Each attempt receives
-only the remaining overall deadline.
+The router makes a weighted-random choice among positive-weight eligible
+providers. Its weight is `0.50 * ((1 - error_ewma) ** 2) + 0.30 * latency_score
++ 0.20 * load_score`. A provider is unavailable when its circuit is open, its
+per-provider semaphore is full, or an upstream `429 Retry-After` cooldown is
+active. A request makes at most two attempts, never to the same provider. It
+retries only timeout, network failure, HTTP 429, or 5xx; a Redis retry budget
+also gates the second attempt. Other 4xx responses return directly.
+
+One shared HTTPX client has explicit connection limits (200 total, 100
+keepalive) plus connect/read/write/pool phase timeouts. Timeout metrics classify
+pool, connect, read, write, deadline, and other timeout phases with bounded
+labels. Redis token buckets protect providers before upstream work.
 
 Each provider has an in-process circuit breaker: a 20-call window, at least
 five calls, 50% failure threshold, 15 seconds open, and one half-open probe.
@@ -133,15 +132,13 @@ make test
 make lint
 python -m pytest tests/unit -q
 python -m pytest tests/integration -q
-make benchmark-local
 make benchmark-external
 ```
 
-The recorded five-second local smoke used two users and completed one request
-with 0 failures, 0.50 RPS, 2016 ms average latency, and about 2000 ms P95/P99.
-This is only a smoke test, not a representative benchmark. On 2026-09-24 all
-three supplied external endpoints timed out at the five-second connect limit,
-so no external benchmark was reported. See [docs/benchmark.md](docs/benchmark.md).
+The recorded external run made 3,000 requests: 641 succeeded and 2,359 failed
+(78.63%), at 55.38 aggregate RPS, 715 ms average, 4.2 s P95, and 9.2 s P99.
+It returned 2,326 HTTP 503s and 33 HTTP 429s. This does not prove sustainable
+50, 100, or 1,000–10,000 successful RPS; see [docs/benchmark.md](docs/benchmark.md).
 
 ## Trade-offs and scaling
 
@@ -151,8 +148,7 @@ so no external benchmark was reported. See [docs/benchmark.md](docs/benchmark.md
   expensive at high RPS; production should batch audit writes.
 - The provider contract was inferred because the supplied PDF has no body
   schema.
-- Retrying `POST` is safe only for these mock providers; a real integration
-  needs an idempotency key.
+- Retrying `POST` requires an idempotency key in a real integration.
 - External provider availability directly affects external benchmark results.
 - Provider health is visible through logs and metrics, but external downtime
   deliberately does not fail `/health/ready`; readiness covers this

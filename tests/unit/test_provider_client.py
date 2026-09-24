@@ -4,7 +4,7 @@ import respx
 from pydantic import ValidationError
 
 import app.main as main_module
-from app.config import ProviderMode, Settings
+from app.config import Settings
 from app.core.context import get_request_id, get_trace_id, set_request_context
 from app.providers.client import ProviderClient
 from app.providers.models import ProviderConfig, ProviderOutcome
@@ -16,8 +16,10 @@ async def http_client() -> httpx.AsyncClient:
         yield client
 
 
-def test_default_mode_resolves_external_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("PROVIDER_MODE", "PROVIDER_A_URL", "PROVIDER_B_URL", "PROVIDER_C_URL"):
+def test_default_configuration_resolves_external_provider_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("PROVIDER_A_URL", "PROVIDER_B_URL", "PROVIDER_C_URL"):
         monkeypatch.delenv(name, raising=False)
 
     configs = Settings(_env_file=None).provider_configs
@@ -29,8 +31,12 @@ def test_default_mode_resolves_external_provider_urls(monkeypatch: pytest.Monkey
     ]
 
 
-def test_external_mode_resolves_supplied_provider_urls() -> None:
-    configs = Settings(_env_file=None, PROVIDER_MODE=ProviderMode.EXTERNAL).provider_configs
+def test_legacy_provider_mode_environment_does_not_change_external_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PROVIDER_MODE", "mock")
+
+    configs = Settings(_env_file=None).provider_configs
 
     assert [config.url for config in configs] == [
         "http://provider.example.invalid:8001/v1/process",
@@ -42,7 +48,6 @@ def test_external_mode_resolves_supplied_provider_urls() -> None:
 def test_explicit_provider_url_overrides_selected_mode() -> None:
     configs = Settings(
         _env_file=None,
-        PROVIDER_MODE=ProviderMode.EXTERNAL,
         PROVIDER_A_URL="https://override.example/v1/process",
     ).provider_configs
 

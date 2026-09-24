@@ -8,7 +8,6 @@ import structlog
 
 import app.api.routes as api_routes
 import app.main as main_module
-from app.config import ProviderMode
 from app.core.context import set_request_context as real_set_request_context
 from app.main import app
 from app.observability.logging import configure_logging
@@ -41,8 +40,10 @@ class AllowingRateLimiter:
 
 
 @pytest.fixture(autouse=True)
-def use_mock_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_module.settings, "PROVIDER_MODE", ProviderMode.MOCK)
+def use_test_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "PROVIDER_A_URL", "http://provider-a:8000/v1/process")
+    monkeypatch.setattr(main_module.settings, "PROVIDER_B_URL", "http://provider-b:8000/v1/process")
+    monkeypatch.setattr(main_module.settings, "PROVIDER_C_URL", "http://provider-c:8000/v1/process")
     monkeypatch.setattr("app.providers.router.random", lambda: 0.0)
 
 

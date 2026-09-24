@@ -98,9 +98,3 @@ The PostgreSQL request delta exactly matched Locust's 3,000 requests. RabbitMQ's
 - Higher external stages were intentionally not run after the 50-RPS stage exceeded the
   5% stop threshold. The earlier unconstrained overload runs are not presented as
   representative benchmark results.
-
-## Local mock smoke
-
-An earlier five-second local-mock smoke completed one request at 0.50 RPS with no
-failures and approximately 2,016 ms average latency. It verified the benchmark wiring
-only and is not a representative performance result or comparable to the external run.

@@ -1,4 +1,4 @@
-.PHONY: install test lint run benchmark-local benchmark-external
+.PHONY: install test lint run benchmark-external
 
 PYTHON ?= .venv/bin/python
 
@@ -14,10 +14,9 @@ lint:
 run:
 	$(PYTHON) -m uvicorn app.main:app --reload
 
-benchmark-local:
-	docker compose up --build -d --wait --wait-timeout 90
-	$(PYTHON) -m locust -f benchmark/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 30s --csv benchmark/results/local-10
-
+TARGET_RPS ?= 50
+BENCHMARK_USERS ?= 1000
+BENCHMARK_DURATION ?= 60s
 benchmark-external:
-	docker compose --env-file .env.external.example up --build -d --wait --wait-timeout 90
-	$(PYTHON) -m locust -f benchmark/locustfile.py --host http://localhost:8000 --headless -u 10 -r 2 -t 30s --csv benchmark/results/external-10
+	docker compose up --build -d --wait --wait-timeout 90
+	TARGET_RPS=$(TARGET_RPS) BENCHMARK_USERS=$(BENCHMARK_USERS) $(PYTHON) -m locust -f benchmark/locustfile_200rps.py --host http://localhost:8000 --headless -u $(BENCHMARK_USERS) -r 100 -t $(BENCHMARK_DURATION) --csv benchmark/results/external-$(TARGET_RPS)rps

@@ -41,15 +41,17 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
     request_id = request.state.request_id
     trace_id = request.state.trace_id
 
-    if not await request.app.state.admission.acquire():
-        rate_limit_rejections.labels("admission", "global").inc()
-        return JSONResponse(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            content={"error": {"code": "admission_rejected"}},
-            headers={"Retry-After": "1", "X-Request-ID": request_id, "X-Trace-ID": trace_id},
-        )
+    admitted = await request.app.state.admission.acquire()
     response: JSONResponse | None = None
     try:
+        if not admitted:
+            rate_limit_rejections.labels("admission", "global").inc()
+            response = JSONResponse(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                content={"error": {"code": "admission_rejected"}},
+                headers={"Retry-After": "1", "X-Request-ID": request_id, "X-Trace-ID": trace_id},
+            )
+            return response
         try:
             async with asyncio.timeout(request.app.state.settings.REQUEST_DEADLINE_SECONDS):
                 response = await _proxy_request(request, payload, request_id, trace_id)
@@ -65,7 +67,8 @@ async def process(request: Request, payload: dict[str, Any] = Body(...)) -> JSON
             )
         return response
     finally:
-        request.app.state.admission.release()
+        if admitted:
+            request.app.state.admission.release()
         payload_bytes = dumps(payload, separators=(",", ":")).encode()
         request_result = getattr(request.state, "provider_request_result", None)
         attempts = (

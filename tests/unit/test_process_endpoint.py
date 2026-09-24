@@ -7,7 +7,6 @@ import respx
 
 import app.api.routes as api_routes
 import app.main as main_module
-from app.config import ProviderMode
 from app.main import app
 from app.observability.metrics import (
     provider_attempt_counter,
@@ -18,6 +17,7 @@ from app.observability.metrics import (
 from app.providers.circuit_breaker import CircuitBreaker, CircuitState
 from app.providers.models import ProviderAttempt, ProviderOutcome, ProviderResult
 from app.providers.router import ProviderRouter
+from app.resilience.admission import AdmissionController
 from app.resilience.rate_limiter import RateLimitDecision, RateLimiterUnavailable
 
 
@@ -85,8 +85,10 @@ class PlannedRateLimiter:
 
 
 @pytest.fixture(autouse=True)
-def use_mock_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_module.settings, "PROVIDER_MODE", ProviderMode.MOCK)
+def use_test_provider_urls(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(main_module.settings, "PROVIDER_A_URL", "http://provider-a:8000/v1/process")
+    monkeypatch.setattr(main_module.settings, "PROVIDER_B_URL", "http://provider-b:8000/v1/process")
+    monkeypatch.setattr(main_module.settings, "PROVIDER_C_URL", "http://provider-c:8000/v1/process")
     monkeypatch.setattr("app.providers.router.random", lambda: 0.0)
 
 
@@ -130,6 +132,45 @@ async def test_process_rejects_non_object_json(api_client: httpx.AsyncClient) ->
     response = await api_client.post("/v1/process", json=["not", "an", "object"])
 
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_admission_rejection_publishes_audit_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    audit_events: list[dict] = []
+    payload = {"value": "rejected"}
+    monkeypatch.setattr(api_routes, "dispatch_audit_event", audit_events.append)
+
+    async with app.router.lifespan_context(app):
+        app.state.rate_limiter = FakeRateLimiter()
+        app.state.admission = AdmissionController(max_inflight=1, wait_ms=1)
+        assert await app.state.admission.acquire() is True
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/v1/process",
+                json=payload,
+                headers={"X-Request-ID": "rejected-request", "X-Trace-ID": "rejected-trace"},
+            )
+        app.state.admission.release()
+
+    assert response.status_code == 429
+    assert response.json() == {"error": {"code": "admission_rejected"}}
+    assert len(audit_events) == 1
+    assert audit_events[0]["request"] == {
+        "id": audit_events[0]["request"]["id"],
+        "trace_id": "rejected-trace",
+        "received_at": audit_events[0]["request"]["received_at"],
+        "completed_at": audit_events[0]["request"]["completed_at"],
+        "final_status": 429,
+        "selected_provider": None,
+        "total_latency_ms": audit_events[0]["request"]["total_latency_ms"],
+        "payload_size": 20,
+        "payload_sha256": "213de0db4ad47454032c47e69be5ee3e5e55d78ffccfe9d4c9fd31a2a97bfc80",
+        "error_class": None,
+    }
+    assert audit_events[0]["attempts"] == []
 
 
 @pytest.mark.asyncio
