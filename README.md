@@ -79,16 +79,10 @@ metrics.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    C[Client] -->|POST /v1/process\ncorrelation headers| API[FastAPI gateway]
-    API -->|route, rate limit, retry| P[Providers A / B / C]
-    API -->|token bucket, readiness ping| R[(Redis)]
-    API -->|audit event| MQ[(RabbitMQ audit queue)]
-    MQ --> W[Celery audit worker]
-    W -->|idempotent transaction| DB[(PostgreSQL)]
-    API -->|/metrics| M[Prometheus scraper]
-```
+![Zohal gateway architecture](docs/architecture.svg)
+
+The editable Mermaid source and a detailed request-flow description are in
+[`docs/architecture.md`](docs/architecture.md).
 
 The router makes a weighted-random choice among positive-weight eligible
 providers. Its weight is `0.50 * ((1 - error_ewma) ** 2) + 0.30 * latency_score

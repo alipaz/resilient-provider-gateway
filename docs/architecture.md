@@ -7,6 +7,11 @@ exactly three providers, returns the resulting upstream response, and writes a
 compact asynchronous audit record. It uses direct modules and process-local
 routing state as deliberate time-boxed interview trade-offs.
 
+![Zohal gateway architecture](architecture.svg)
+
+<details>
+<summary>Editable Mermaid source</summary>
+
 ```mermaid
 flowchart TB
     client[Client] --> gateway[FastAPI API]
@@ -19,6 +24,8 @@ flowchart TB
     worker --> postgres[(PostgreSQL audit tables)]
     gateway --> metrics[Prometheus /metrics]
 ```
+
+</details>
 
 ## Request path
 
