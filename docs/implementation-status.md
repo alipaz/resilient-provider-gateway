@@ -24,6 +24,9 @@ Step 7 adds per-process JSON logging, bounded-label Prometheus metrics, and
 lightweight liveness/readiness checks. Redis readiness performs only a
 connectivity ping; RabbitMQ and PostgreSQL readiness report configured presence
 without issuing per-request service queries.
+Step 8 adds one environment-configured local mock-provider application for the
+default mock runtime. Its A/B/C profiles provide seeded latency, rate-limit,
+5xx, and timeout behavior; integration tests route only to these local mocks.
 
 ## Steps 1-10
 
@@ -34,6 +37,6 @@ without issuing per-request service queries.
 - [x] Step 5 — admission backpressure and Redis-backed provider rate limiting.
 - [x] Step 6 — asynchronous idempotent audit persistence.
 - [x] Step 7 — JSON logs, Prometheus metrics, and readiness checks.
-- [ ] Step 8 — not implemented.
+- [x] Step 8 — local mock providers and deterministic gateway integration coverage.
 - [ ] Step 9 — not implemented.
 - [ ] Step 10 — not implemented.

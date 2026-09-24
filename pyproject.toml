@@ -36,6 +36,9 @@ packages = ["app"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "integration: end-to-end gateway behavior using local mock providers",
+]
 
 [tool.ruff]
 target-version = "py312"
