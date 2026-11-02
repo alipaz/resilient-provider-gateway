@@ -1,154 +1,101 @@
-# Provider gateway interview deliverable
+# Zohal
 
-This FastAPI gateway proxies JSON-object requests to three providers. It includes
-load-aware routing, bounded retries, in-process circuits, Redis rate limiting,
-backpressure, asynchronous PostgreSQL audit persistence, JSON logs, Prometheus
-metrics, Docker Compose, and Locust benchmarking.
+**A resilient API gateway for routing requests across multiple providers.**
 
-## Prerequisites and startup
+Zohal is a FastAPI gateway that forwards JSON requests to one of three upstream providers. It combines load-aware routing with rate limiting, bounded retries, circuit breakers, and asynchronous audit persistence.
 
-- Docker Desktop with Docker Compose v2.
-- Python 3.12 and a project virtual environment for local tests and Locust.
+![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)
+![Redis](https://img.shields.io/badge/Rate%20limits-Redis-DC382D?logo=redis&logoColor=white)
+![RabbitMQ](https://img.shields.io/badge/Audit%20queue-RabbitMQ-FF6600?logo=rabbitmq&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/Audit%20storage-PostgreSQL-4169E1?logo=postgresql&logoColor=white)
 
-Start the complete stack against the supplied real external providers:
+## Highlights
 
-```sh
-docker compose up --build -d
-```
-
-When the API is healthy, send a sample JSON object:
-
-```sh
-curl -i http://localhost:8000/v1/process \
-  -H 'content-type: application/json' \
-  -H 'X-Request-ID: demo-request-1' \
-  -H 'X-Trace-ID: demo-trace-1' \
-  --data '{"value":"hello"}'
-```
-
-The API is `http://localhost:8000`; the default request path uses the three
-supplied external providers. Stop with `docker compose down` (use `-v` only
-when intentionally removing local state). Explicit provider URL variables can
-override the supplied defaults for a deployment-specific endpoint.
-
-## Configuration
-
-Settings load from the environment (or an uncommitted local `.env`). Explicit
-provider URLs always take precedence over the supplied external defaults.
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `PROVIDER_A_URL`, `PROVIDER_B_URL`, `PROVIDER_C_URL` | unset | Explicit per-provider override; final precedence layer. |
-| `PROVIDER_CONNECT_TIMEOUT_SECONDS` | `2` | Upstream connect timeout. |
-| `PROVIDER_READ_TIMEOUT_SECONDS`, `PROVIDER_WRITE_TIMEOUT_SECONDS`, `PROVIDER_POOL_TIMEOUT_SECONDS` | `10`, `10`, `2` | Explicit read/write/pool timeouts. |
-| `HTTP_MAX_CONNECTIONS`, `HTTP_MAX_KEEPALIVE_CONNECTIONS` | `200`, `100` | Shared HTTPX connection-pool and keepalive limits. |
-| `REQUEST_DEADLINE_SECONDS` | `15` | Shared budget for both permitted attempts. |
-| `MAX_INFLIGHT`, `ADMISSION_WAIT_MS` | `200`, `50` | Global concurrency and bounded admission wait. |
-| `REDIS_URL` | `redis://localhost:6379/0` | Provider token buckets and readiness. |
-| `RABBITMQ_URL` | `amqp://guest:guest@localhost:5672//` | Celery audit broker. |
-| `DATABASE_URL` | `postgresql+psycopg://localhost/audit` | PostgreSQL audit database. |
-| `PROVIDER_{A,B,C}_RATE_CAPACITY`, `PROVIDER_{A,B,C}_RATE_REFILL_RPS` | A `10`/`10`; B/C `100`/`100` | Redis token-bucket capacity/refill per provider. |
-| `PROVIDER_{A,B,C}_MAX_CONCURRENT` | A `10`; B/C `100` | In-process upstream-call limit per provider. |
-
-The three supplied external URLs are built-in defaults. `.env.external.example`
-lists the same explicit overrides for deployments that require them.
-
-## API contract
-
-`POST /v1/process` accepts a JSON object, forwards it to a selected provider,
-and returns the final upstream status and JSON object. Every controlled gateway
-response, including errors, includes `X-Request-ID` and `X-Trace-ID`; valid
-incoming values are reused and unsafe values receive safe generated IDs.
-Forwarded responses also include `X-Upstream-Provider`.
-
-| Status | Error code | Meaning |
-| --- | --- | --- |
-| `422` | `invalid_correlation_id` | An incoming correlation header is unsafe. A non-object body also receives framework `422` validation. |
-| `429` | `admission_rejected` | No global slot within 50 ms; `Retry-After: 1`. |
-| `429` | `provider_rate_limited` | Every eligible provider was denied by its token bucket; `Retry-After: 1`. |
-| `500` | `internal_error` | An unexpected gateway failure; no exception details are exposed. |
-| `502` | `invalid_upstream_response` | Upstream did not return a JSON object. |
-| `503` | `rate_limiter_unavailable` | Redis could not make a safe rate decision. |
-| `503` | `no_provider_available` | No eligible provider remained. |
-| `504` | `upstream_timeout` | An upstream attempt timed out or the overall request deadline elapsed. |
-
-`GET /health/live` proves only process liveness. `GET /health/ready` pings
-Redis and reports RabbitMQ/PostgreSQL configuration presence; it intentionally
-does not fail for external provider downtime. `GET /metrics` exposes Prometheus
-metrics.
+- **Load-aware routing:** selects an eligible provider using recent errors, latency, and in-flight load.
+- **Resilience:** applies per-process circuit breakers, provider concurrency limits, a request deadline, and at most one retry to a different provider.
+- **Traffic protection:** uses Redis token buckets and a bounded admission queue to reject excess work rather than accept unlimited load.
+- **Asynchronous audit:** publishes compact request and attempt metadata to RabbitMQ; a Celery worker writes it to PostgreSQL with idempotent upserts.
+- **Observability:** exposes Prometheus metrics, structured JSON logs, health endpoints, and request/trace correlation headers.
 
 ## Architecture
 
 ![Zohal gateway architecture](docs/architecture.svg)
 
-The editable Mermaid source and a detailed request-flow description are in
-[`docs/architecture.md`](docs/architecture.md).
+The gateway makes upstream calls directly. RabbitMQ and Celery are used for audit persistence, not provider calls. Redis holds shared rate-limit state; routing statistics and circuit breakers are local to each API process. See the [architecture guide](docs/architecture.md) for the request flow and operational trade-offs.
 
-The router makes a weighted-random choice among positive-weight eligible
-providers. Its weight is `0.50 * ((1 - error_ewma) ** 2) + 0.30 * latency_score
-+ 0.20 * load_score`. A provider is unavailable when its circuit is open, its
-per-provider semaphore is full, or an upstream `429 Retry-After` cooldown is
-active. A request makes at most two attempts, never to the same provider. It
-retries only timeout, network failure, HTTP 429, or 5xx; a Redis retry budget
-also gates the second attempt. Other 4xx responses return directly.
+## Quick start
 
-One shared HTTPX client has explicit connection limits (200 total, 100
-keepalive) plus connect/read/write/pool phase timeouts. Timeout metrics classify
-pool, connect, read, write, deadline, and other timeout phases with bounded
-labels. Redis token buckets protect providers before upstream work.
-
-Each provider has an in-process circuit breaker: a 20-call window, at least
-five calls, 50% failure threshold, 15 seconds open, and one half-open probe.
-Timeouts, network errors, and 5xx count as failures. A bounded global semaphore
-and per-provider semaphores constrain active work. Redis Lua token buckets are
-checked before upstream execution; unavailable Redis returns `503` rather than
-silently bypassing limits.
-
-## Persistence and observability
-
-The API performs upstream calls itself, then publishes one compact audit event
-to the durable bounded RabbitMQ `audit` queue. Celery only persists it to
-PostgreSQL and has no result backend. Events contain request and attempt
-metadata, never full request/response bodies; the database stores payload size
-and SHA-256 only. The unique `(request_id, attempt_number)` constraint plus
-upserts makes redelivery idempotent; transient database errors retry up to three
-times.
-
-Structlog emits JSON. Request logs include `request_id`, `trace_id`, method,
-path, status, and latency; provider logs add provider, attempt number, outcome,
-upstream status, and latency. Prometheus labels are bounded to method/status
-class, provider/outcome, and scope—never correlation IDs or payloads.
-
-## Tests and benchmarks
+**Prerequisite:** Docker Desktop with Docker Compose v2. Run the following from the project root:
 
 ```sh
-make test
-make lint
-python -m pytest tests/unit -q
-python -m pytest tests/integration -q
-make benchmark-external
+docker compose up --build -d
 ```
 
-The recorded external run made 3,000 requests: 641 succeeded and 2,359 failed
-(78.63%), at 55.38 aggregate RPS, 715 ms average, 4.2 s P95, and 9.2 s P99.
-It returned 2,326 HTTP 503s and 33 HTTP 429s. This does not prove sustainable
-50, 100, or 1,000–10,000 successful RPS; see [docs/benchmark.md](docs/benchmark.md).
+Compose starts the API, PostgreSQL, Redis, RabbitMQ, the audit worker, and a migration job. The API listens on port `8000`.
 
-## Trade-offs and scaling
+```sh
+curl --fail http://localhost:8000/health/live
+curl --fail http://localhost:8000/health/ready
+```
 
-- Circuit breaker state is per process in this demo, so replicas do not share
-  failure history.
-- One Celery message and one database transaction per request are simple but
-  expensive at high RPS; production should batch audit writes.
-- The provider contract was inferred because the supplied PDF has no body
-  schema.
-- Retrying `POST` requires an idempotency key in a real integration.
-- External provider availability directly affects external benchmark results.
-- Provider health is visible through logs and metrics, but external downtime
-  deliberately does not fail `/health/ready`; readiness covers this
-  application's Redis, RabbitMQ, and PostgreSQL dependencies.
+Send a JSON object to the gateway:
 
-For 1,000–10,000 RPS, use multiple API replicas, shared Redis limits,
-independently scale the broker/workers, batch database writes, partition
-PostgreSQL audit data, size connection pools, and define retention/archival.
-This submitted demo does **not** claim to achieve 10,000 RPS.
+```sh
+curl -i http://localhost:8000/v1/process \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: example-request-1' \
+  -H 'X-Trace-ID: example-trace-1' \
+  --data '{"value":"hello"}'
+```
+
+**Provider traffic:** the default provider URLs use the reserved `example.invalid` domain and are not working endpoints. Set all three provider URL overrides before sending requests to `/v1/process`. Use endpoints you are authorized to call and avoid sending sensitive data to an untrusted provider. The bundled Compose credentials are for local development only.
+
+Stop the stack with `docker compose down`. Add `-v` only when you intend to delete its persisted data.
+
+## API
+
+| Endpoint | Purpose |
+| --- | --- |
+| `POST /v1/process` | Routes a JSON object to an eligible provider and returns its JSON response or a controlled gateway error. |
+| `GET /health/live` | Checks that the API process is running. |
+| `GET /health/ready` | Pings Redis and reports whether RabbitMQ and PostgreSQL are configured; it does not test their connectivity or upstream provider health. |
+| `GET /metrics` | Exposes Prometheus metrics. |
+
+Responses include `X-Request-ID` and `X-Trace-ID`. Forwarded responses also identify the provider with `X-Upstream-Provider`. Depending on the failure, the gateway returns controlled `429`, `502`, `503`, or `504` responses. The [architecture guide](docs/architecture.md) describes routing, retry, and failure behavior.
+
+## Configuration
+
+Settings are read from environment variables or a local `.env` file. Key options include:
+
+| Variables | Purpose |
+| --- | --- |
+| `PROVIDER_A_URL`, `PROVIDER_B_URL`, `PROVIDER_C_URL` | Configure the three upstream endpoints; defaults are non-working examples. |
+| `REDIS_URL` | Redis connection for rate limiting and readiness. |
+| `RABBITMQ_URL` | Celery audit broker connection. |
+| `DATABASE_URL` | PostgreSQL audit database connection. |
+| `REQUEST_DEADLINE_SECONDS` | Overall time budget shared by provider attempts. |
+| `MAX_INFLIGHT`, `ADMISSION_WAIT_MS` | Global concurrency and bounded admission wait. |
+| `PROVIDER_{A,B,C}_RATE_CAPACITY`, `PROVIDER_{A,B,C}_RATE_REFILL_RPS` | Per-provider token-bucket limits. |
+| `PROVIDER_{A,B,C}_MAX_CONCURRENT` | Per-provider concurrency limits. |
+
+See [application settings](app/config.py) and the [Compose configuration](docker-compose.yml) for defaults and connection-pool settings. Do not commit credentials or private environment files.
+
+## Development and testing
+
+For local Python tests, use Python 3.12 and a virtual environment:
+
+```sh
+python -m venv .venv
+.venv/bin/python -m pip install -e '.[dev]'
+make test
+make lint
+```
+
+The project also includes a Locust load-test profile. Review [benchmark guidance](benchmark/README.md) and target only providers you are authorized to test. The [recorded benchmark](docs/benchmark.md) reports its failures and limitations; it does not establish sustained production throughput.
+
+## Operational boundaries
+
+This project is a demonstration gateway, not a production deployment configuration. In particular, circuit-breaker and routing state are per process, audit publication can fail, and the default Compose stack uses development credentials. The API forwards requests to external providers, so production use requires appropriate authentication, transport security, data handling, and provider agreements. Audit records include metadata and a payload hash rather than full request or response bodies.
+
+Explore the [architecture guide](docs/architecture.md), [implementation status](docs/implementation-status.md), and [benchmark results](docs/benchmark.md) for more detail.
