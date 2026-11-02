@@ -7,7 +7,7 @@ under `benchmark/results/` and is intentionally ignored by Git.
 ## External providers
 
 `make benchmark-external` runs the controlled fixed-throughput profile against
-the supplied external providers: 50 target RPS, 1,000 users, a 100-user/second
+configured external providers: 50 target RPS, 1,000 users, a 100-user/second
 ramp, and 60 seconds by default. It passes the same `BENCHMARK_USERS` value to
 Locust and the profile, so per-user throughput is `TARGET_RPS / BENCHMARK_USERS`.
 

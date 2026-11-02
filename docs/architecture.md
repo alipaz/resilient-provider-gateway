@@ -75,8 +75,8 @@ bounded-cardinality Prometheus metrics, including timeout phase counts for
 pool, connect, read, write, deadline, and other timeouts.
 
 Compose runs the API, one migration job, Celery, Redis, RabbitMQ, and
-PostgreSQL. The application calls the three supplied external providers by
-default; explicit provider URL variables are final overrides. Circuit state
+PostgreSQL. The default provider URLs use the reserved `example.invalid` domain and are not
+working endpoints; configure all three provider URL variables before sending traffic. Circuit state
 remains per process, so replicas make independent breaker decisions. The demo
 does not claim 10,000 RPS: that requires multiple API replicas, shared Redis
 limits, independently scaled broker/workers, batched writes, PostgreSQL
